@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.log
+.streamlit/secrets.toml
+database/*.db
+database/*.sqlite*
+face_data/*.jpg
+face_data/*.jpeg
+face_data/*.png
+reports/*.csv

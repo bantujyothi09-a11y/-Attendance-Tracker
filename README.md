@@ -86,6 +86,37 @@ attendance-tracker/
 
 5. Open the application in your browser.
 
+## Streamlit Website Version
+
+This repository now includes a working Streamlit website based on the Spec Kit files.
+
+Run it with:
+
+```bash
+python -m streamlit run app.py
+```
+
+Then open:
+
+```text
+http://localhost:8501
+```
+
+Demo login accounts:
+
+| Role | Username | Password |
+| --- | --- | --- |
+| Admin | admin | admin123 |
+| Teacher | teacher | teacher123 |
+
+### Face Attendance
+
+Open `Face Attendance` from the sidebar.
+
+1. Sign in as Admin and use `Register Face` to save a reference face image for a student.
+2. Use `Scan Attendance` with camera or upload to recognize the student.
+3. A successful match marks that student as `Present` for the selected date.
+
 ## Usage
 
 ### Adding Students
