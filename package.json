@@ -1,0 +1,20 @@
+{
+  "name": "attendance-tracker",
+  "version": "1.0.0",
+  "description": "Attendance Tracker is a simple and efficient application designed to manage student attendance records. It enables administrators, teachers, or trainers to record attendance, monitor participation, and generate attendance reports with ease.",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://code.swecha.org/Bantu_jyothi13/attendance-tracker.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs"
+}
