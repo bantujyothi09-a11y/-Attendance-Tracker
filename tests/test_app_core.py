@@ -110,6 +110,20 @@ class AttendanceTrackerCoreTests(unittest.TestCase):
         self.assertEqual(distance, 0)
         self.assertEqual(confidence, 100.0)
 
+    def test_demo_face_profiles_match_generated_demo_scan(self):
+        created = app.create_demo_face_profiles()
+        self.assertGreater(created, 0)
+
+        student = app.fetch_one("SELECT * FROM students ORDER BY id LIMIT 1")
+        scan_image = app.demo_face_image(student)
+        scan_hash = app.image_to_hash(scan_image)
+        match, confidence, distance = app.find_face_match(scan_hash)
+
+        self.assertIsNotNone(match)
+        self.assertEqual(match["student_id"], student["id"])
+        self.assertEqual(distance, 0)
+        self.assertEqual(confidence, 100.0)
+
 
 if __name__ == "__main__":
     unittest.main()

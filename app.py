@@ -8,12 +8,13 @@ import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from io import StringIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Iterable
 
 import streamlit as st
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageOps
+from translations import LANGUAGE_OPTIONS, translations
 
 
 APP_DIR = Path(__file__).parent
@@ -22,6 +23,36 @@ FACE_DIR = APP_DIR / "face_data"
 STYLE_PATH = APP_DIR / "static" / "style.css"
 SESSION_TIMEOUT_MINUTES = 45
 ATTENDANCE_STATUSES = ("Present", "Absent", "Excused")
+STATUS_KEYS = {"Present": "present", "Absent": "absent", "Excused": "excused"}
+STUDENT_STATUS_KEYS = {"Active": "active", "Archived": "archived"}
+ROLE_KEYS = {"Admin": "admin", "Teacher": "teacher"}
+COLUMN_KEYS = {
+    "id": "col_id",
+    "first_name": "col_first_name",
+    "last_name": "col_last_name",
+    "roll_number": "col_roll_number",
+    "student": "col_student",
+    "class": "col_class",
+    "class_name": "col_class_name",
+    "section": "col_section",
+    "attendance_date": "col_attendance_date",
+    "status": "col_status",
+    "marked_by": "col_marked_by",
+    "enrollment_date": "col_enrollment_date",
+    "contact_number": "col_contact_number",
+    "email": "col_email",
+    "present": "col_present",
+    "absent": "col_absent",
+    "excused": "col_excused",
+    "total": "col_total",
+    "total_records": "col_total_records",
+    "attendance_percentage": "col_attendance_percentage",
+    "username": "col_username",
+    "full_name": "col_full_name",
+    "role": "col_role",
+    "phone": "col_phone",
+    "last_login": "col_last_login",
+}
 
 
 @dataclass(frozen=True)
@@ -169,6 +200,65 @@ def load_css() -> None:
         st.markdown(f"<style>{STYLE_PATH.read_text(encoding='utf-8')}</style>", unsafe_allow_html=True)
 
 
+def init_language() -> None:
+    if "language" not in st.session_state:
+        st.session_state.language = "en"
+
+
+def t(key: str) -> str:
+    return translations[st.session_state.language][key]
+
+
+def language_selector(location=st.sidebar) -> None:
+    init_language()
+    current_label = next(label for label, code in LANGUAGE_OPTIONS.items() if code == st.session_state.language)
+    selected_label = location.selectbox(
+        t("language_label"),
+        list(LANGUAGE_OPTIONS.keys()),
+        index=list(LANGUAGE_OPTIONS.keys()).index(current_label),
+        format_func=lambda label: translations[LANGUAGE_OPTIONS[label]][
+            {"English": "english", "हिन्दी": "hindi", "తెలుగు": "telugu"}[label]
+        ],
+    )
+    st.session_state.language = LANGUAGE_OPTIONS[selected_label]
+
+
+def clear_session_keep_language() -> None:
+    language = st.session_state.get("language", "en")
+    st.session_state.clear()
+    st.session_state.language = language
+
+
+def translate_status(status: str) -> str:
+    return t(STATUS_KEYS.get(status, status.lower()))
+
+
+def translate_student_status(status: str) -> str:
+    return t(STUDENT_STATUS_KEYS.get(status, status.lower()))
+
+
+def translate_role(role: str) -> str:
+    return t(ROLE_KEYS.get(role, role.lower()))
+
+
+def localize_row(row: dict) -> dict:
+    localized = {}
+    for key, value in row.items():
+        column = t(COLUMN_KEYS[key]) if key in COLUMN_KEYS else key
+        if key == "status" and value in STATUS_KEYS:
+            value = translate_status(value)
+        elif key == "status" and value in STUDENT_STATUS_KEYS:
+            value = translate_student_status(value)
+        elif key == "role" and value in ROLE_KEYS:
+            value = translate_role(value)
+        localized[column] = value
+    return localized
+
+
+def localize_rows(rows: Iterable[dict | sqlite3.Row]) -> list[dict]:
+    return [localize_row(dict(row)) for row in rows]
+
+
 def page_header(kicker: str, title: str, copy: str, chips: Iterable[str] = ()) -> None:
     chip_html = "".join(f'<span class="status-chip">{chip}</span>' for chip in chips)
     st.markdown(
@@ -209,6 +299,50 @@ def save_face_reference(student_id: int, uploaded_image) -> str:
     image.save(path, format="JPEG", quality=88)
     uploaded_image.seek(0)
     return str(path.relative_to(APP_DIR))
+
+
+def demo_face_image(student: sqlite3.Row | dict) -> BytesIO:
+    seed = int(hashlib.sha256(str(student["id"]).encode()).hexdigest()[:8], 16)
+    bg = (55 + ((seed >> 16) % 90), 70 + ((seed >> 8) % 80), 80 + (seed % 85))
+    accent = (80 + ((seed >> 12) % 120), 90 + ((seed >> 4) % 100), 100 + ((seed >> 20) % 90))
+    image = Image.new("RGB", (256, 256), bg)
+    draw = ImageDraw.Draw(image)
+    draw.ellipse((54, 34, 202, 206), fill=(224, 181, 136), outline=accent, width=7)
+    draw.ellipse((88, 96, 108, 116), fill=(30, 35, 45))
+    draw.ellipse((148, 96, 168, 116), fill=(30, 35, 45))
+    draw.arc((92, 122, 164, 174), 15, 165, fill=(90, 55, 50), width=5)
+    draw.rectangle((70, 54, 186, 76), fill=accent)
+    initials = f"{student['first_name'][:1]}{student['last_name'][:1]}".upper()
+    draw.text((104, 210), initials, fill=(255, 255, 255))
+    output = BytesIO()
+    image.save(output, format="PNG")
+    output.seek(0)
+    return output
+
+
+def create_demo_face_profiles() -> int:
+    students = student_options(active_only=True)
+    created = 0
+    with closing(connect()) as conn:
+        stamp = now_text()
+        for student in students:
+            image_file = demo_face_image(student)
+            image_hash = image_to_hash(image_file)
+            image_path = save_face_reference(student["id"], image_file)
+            conn.execute(
+                """
+                INSERT INTO face_profiles (student_id, image_hash, image_path, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(student_id)
+                DO UPDATE SET image_hash = excluded.image_hash,
+                              image_path = excluded.image_path,
+                              updated_at = excluded.updated_at
+                """,
+                (student["id"], image_hash, image_path, stamp, stamp),
+            )
+            created += 1
+        conn.commit()
+    return created
 
 
 def find_face_match(image_hash: str, threshold: int = 330) -> tuple[sqlite3.Row | None, float, int]:
@@ -265,39 +399,40 @@ def current_user() -> User | None:
         st.session_state.pop("last_seen", None)
         return None
     if datetime.now(UTC) - last_seen > timedelta(minutes=SESSION_TIMEOUT_MINUTES):
-        st.session_state.clear()
-        st.warning("Session expired. Please sign in again.")
+        clear_session_keep_language()
+        st.warning(t("session_expired"))
         return None
     st.session_state.last_seen = datetime.now(UTC)
     return User(**user_data)
 
 
 def login_screen() -> None:
+    language_selector()
     st.markdown('<div class="app-shell">', unsafe_allow_html=True)
-    st.markdown('<div class="section-label">Neural Attendance Console</div>', unsafe_allow_html=True)
-    st.markdown('<h1 class="app-title">Attendance <strong>Tracker</strong></h1>', unsafe_allow_html=True)
+    st.markdown(f'<div class="section-label">{t("login_kicker")}</div>', unsafe_allow_html=True)
+    st.markdown(f'<h1 class="app-title">{t("login_title_html")}</h1>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="app-subtitle">A futuristic control room for student records, live attendance capture, secure sessions, and report intelligence.</div>',
+        f'<div class="app-subtitle">{t("login_subtitle")}</div>',
         unsafe_allow_html=True,
     )
     st.markdown(
-        """
+        f"""
         <div class="status-strip">
-          <span class="status-chip">SQLite core online</span>
-          <span class="status-chip">Role access enabled</span>
-          <span class="status-chip">Reports ready</span>
+          <span class="status-chip">{t("sqlite_online")}</span>
+          <span class="status-chip">{t("role_access_enabled")}</span>
+          <span class="status-chip">{t("reports_ready")}</span>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
     with st.form("login_form", clear_on_submit=False):
-        username = st.text_input("Username", value="admin")
-        password = st.text_input("Password", type="password", value="admin123")
-        submitted = st.form_submit_button("Sign in", use_container_width=True)
+        username = st.text_input(t("username"), value="admin")
+        password = st.text_input(t("password"), type="password", value="admin123")
+        submitted = st.form_submit_button(t("sign_in"), use_container_width=True)
 
     st.markdown(
-        '<div class="notice">Demo accounts: admin / admin123 and teacher / teacher123.</div>',
+        f'<div class="notice">{t("demo_accounts")}</div>',
         unsafe_allow_html=True,
     )
 
@@ -307,7 +442,7 @@ def login_screen() -> None:
             st.session_state.user = user.__dict__
             st.session_state.last_seen = datetime.now(UTC)
             st.rerun()
-        st.error("Invalid username or password.")
+        st.error(t("invalid_login"))
     st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -345,27 +480,27 @@ def dashboard() -> None:
     rate = round((present / (present + absent)) * 100, 1) if present + absent else 0
 
     page_header(
-        "Mission Control",
-        "Attendance <strong>Dashboard</strong>",
-        "Monitor daily attendance signals, active student load, user access, and live reporting health from one command surface.",
-        ("Live SQLite telemetry", "Session protected", "CSV export armed"),
+        t("mission_control"),
+        t("dashboard_title_html"),
+        t("dashboard_copy"),
+        (t("live_sqlite_telemetry"), t("session_protected"), t("csv_export_armed")),
     )
     st.markdown(
         f"""
         <div class="metric-row">
-          <div class="metric-tile"><strong>{totals['active_students']}</strong><span>Active students</span></div>
-          <div class="metric-tile"><strong>{totals['today_records']}</strong><span>Marked today</span></div>
-          <div class="metric-tile"><strong>{rate}%</strong><span>Overall attendance</span></div>
-          <div class="metric-tile"><strong>{totals['users']}</strong><span>System users</span></div>
+          <div class="metric-tile"><strong>{totals['active_students']}</strong><span>{t("active_students")}</span></div>
+          <div class="metric-tile"><strong>{totals['today_records']}</strong><span>{t("marked_today")}</span></div>
+          <div class="metric-tile"><strong>{rate}%</strong><span>{t("overall_attendance")}</span></div>
+          <div class="metric-tile"><strong>{totals['users']}</strong><span>{t("system_users")}</span></div>
         </div>
         <div class="signal-grid">
           <div class="signal-card">
-            <div class="signal-title">Attendance signal strength</div>
+            <div class="signal-title">{t("attendance_signal_strength")}</div>
             <div class="signal-bar"><div class="signal-fill" style="width: {max(4, min(rate, 100))}%;"></div></div>
           </div>
           <div class="signal-card">
-            <div class="signal-title">System mode</div>
-            <strong>Operational</strong><br><span style="color: var(--muted);">All core agents are responding.</span>
+            <div class="signal-title">{t("system_mode")}</div>
+            <strong>{t("operational")}</strong><br><span style="color: var(--muted);">{t("core_agents_responding")}</span>
           </div>
         </div>
         """,
@@ -383,8 +518,8 @@ def dashboard() -> None:
         LIMIT 15
         """
     )
-    st.subheader("Recent Attendance")
-    st.dataframe([dict(row) for row in recent], use_container_width=True, hide_index=True)
+    st.subheader(t("recent_attendance"))
+    st.dataframe(localize_rows(recent), use_container_width=True, hide_index=True)
 
 
 def student_options(active_only: bool = True) -> list[sqlite3.Row]:
@@ -401,16 +536,20 @@ def student_options(active_only: bool = True) -> list[sqlite3.Row]:
 
 def student_management(user: User) -> None:
     page_header(
-        "Student Matrix",
-        "Student <strong>Records</strong>",
-        "Search, create, update, and archive student profiles with role-aware controls and persistent storage.",
-        ("Admin write access" if user.role == "Admin" else "Teacher read-only", "Indexed search", "Active archive flow"),
+        t("student_matrix"),
+        t("student_records_title_html"),
+        t("student_records_copy"),
+        (
+            t("admin_write_access") if user.role == "Admin" else t("teacher_read_only"),
+            t("indexed_search"),
+            t("active_archive_flow"),
+        ),
     )
 
     if user.role != "Admin":
-        st.info("Teacher access is read-only for student records.")
+        st.info(t("teacher_student_readonly"))
 
-    search = st.text_input("Search by name, roll number, class, or section")
+    search = st.text_input(t("search_student"), placeholder=t("search_student_placeholder"))
     params: list[str] = []
     where = ""
     if search.strip():
@@ -431,26 +570,26 @@ def student_management(user: User) -> None:
         """,
         params,
     )
-    st.dataframe([dict(row) for row in rows], use_container_width=True, hide_index=True)
+    st.dataframe(localize_rows(rows), use_container_width=True, hide_index=True)
 
     if user.role != "Admin":
         return
 
-    tab_add, tab_edit = st.tabs(["Add Student", "Edit or Archive"])
+    tab_add, tab_edit = st.tabs([t("add_student"), t("edit_or_archive")])
     with tab_add:
         with st.form("add_student"):
             cols = st.columns(2)
-            first_name = cols[0].text_input("First name")
-            last_name = cols[1].text_input("Last name")
-            roll_number = cols[0].text_input("Roll number")
-            class_name = cols[1].text_input("Class")
-            section = cols[0].text_input("Section")
-            enrollment_date = cols[1].date_input("Enrollment date", value=date.today())
-            contact_number = cols[0].text_input("Contact number")
-            email = cols[1].text_input("Email")
-            if st.form_submit_button("Create student", use_container_width=True):
+            first_name = cols[0].text_input(t("first_name"))
+            last_name = cols[1].text_input(t("last_name"))
+            roll_number = cols[0].text_input(t("roll_number"))
+            class_name = cols[1].text_input(t("class"))
+            section = cols[0].text_input(t("section"))
+            enrollment_date = cols[1].date_input(t("enrollment_date"), value=date.today())
+            contact_number = cols[0].text_input(t("contact_number"))
+            email = cols[1].text_input(t("email"))
+            if st.form_submit_button(t("create_student"), use_container_width=True):
                 if not all([first_name.strip(), last_name.strip(), roll_number.strip(), class_name.strip(), section.strip()]):
-                    st.error("First name, last name, roll number, class, and section are required.")
+                    st.error(t("required_student_fields"))
                 else:
                     try:
                         with closing(connect()) as conn:
@@ -476,38 +615,48 @@ def student_management(user: User) -> None:
                                 ),
                             )
                             conn.commit()
-                        st.success("Student created.")
+                        st.success(t("student_created"))
                         st.rerun()
                     except sqlite3.IntegrityError:
-                        st.error("Roll number already exists.")
+                        st.error(t("roll_number_exists"))
 
     with tab_edit:
         all_students = student_options(active_only=False)
         if not all_students:
-            st.info("No students available.")
+            st.info(t("no_students_available"))
             return
+        student_lookup = {row["id"]: row for row in all_students}
         selected = st.selectbox(
-            "Select student",
-            all_students,
-            format_func=lambda r: f"{r['roll_number']} - {r['first_name']} {r['last_name']} ({r['status']})",
+            t("select_student"),
+            list(student_lookup.keys()),
+            format_func=lambda student_id: (
+                f"{student_lookup[student_id]['roll_number']} - "
+                f"{student_lookup[student_id]['first_name']} {student_lookup[student_id]['last_name']} "
+                f"({translate_student_status(student_lookup[student_id]['status'])})"
+            ),
         )
-        detail = fetch_one("SELECT * FROM students WHERE id = ?", (selected["id"],))
+        detail = fetch_one("SELECT * FROM students WHERE id = ?", (selected,))
         if not detail:
-            st.warning("Selected student was not found.")
+            st.warning(t("selected_student_not_found"))
             return
 
         with st.form("edit_student"):
             cols = st.columns(2)
-            first_name = cols[0].text_input("First name", value=detail["first_name"])
-            last_name = cols[1].text_input("Last name", value=detail["last_name"])
-            roll_number = cols[0].text_input("Roll number", value=detail["roll_number"])
-            class_name = cols[1].text_input("Class", value=detail["class_name"])
-            section = cols[0].text_input("Section", value=detail["section"])
-            enrollment_date = cols[1].date_input("Enrollment date", value=date.fromisoformat(detail["enrollment_date"]))
-            contact_number = cols[0].text_input("Contact number", value=detail["contact_number"] or "")
-            email = cols[1].text_input("Email", value=detail["email"] or "")
-            status = st.selectbox("Status", ("Active", "Archived"), index=0 if detail["status"] == "Active" else 1)
-            if st.form_submit_button("Save changes", use_container_width=True):
+            first_name = cols[0].text_input(t("first_name"), value=detail["first_name"])
+            last_name = cols[1].text_input(t("last_name"), value=detail["last_name"])
+            roll_number = cols[0].text_input(t("roll_number"), value=detail["roll_number"])
+            class_name = cols[1].text_input(t("class"), value=detail["class_name"])
+            section = cols[0].text_input(t("section"), value=detail["section"])
+            enrollment_date = cols[1].date_input(t("enrollment_date"), value=date.fromisoformat(detail["enrollment_date"]))
+            contact_number = cols[0].text_input(t("contact_number"), value=detail["contact_number"] or "")
+            email = cols[1].text_input(t("email"), value=detail["email"] or "")
+            status = st.selectbox(
+                t("status"),
+                ("Active", "Archived"),
+                index=0 if detail["status"] == "Active" else 1,
+                format_func=translate_student_status,
+            )
+            if st.form_submit_button(t("save_changes"), use_container_width=True):
                 try:
                     with closing(connect()) as conn:
                         conn.execute(
@@ -532,29 +681,35 @@ def student_management(user: User) -> None:
                             ),
                         )
                         conn.commit()
-                    st.success("Student updated.")
+                    st.success(t("student_updated"))
                     st.rerun()
                 except sqlite3.IntegrityError:
-                    st.error("Roll number already exists.")
+                    st.error(t("roll_number_exists"))
 
 
 def attendance_page(user: User) -> None:
     page_header(
-        "Capture Grid",
-        "Mark <strong>Attendance</strong>",
-        "Select a class, lock onto a date, and submit attendance with duplicate-safe upsert behavior.",
-        ("Present", "Absent", "Excused"),
+        t("capture_grid"),
+        t("mark_attendance_title_html"),
+        t("mark_attendance_copy"),
+        (t("present"), t("absent"), t("excused")),
     )
 
     classes = fetch_all(
         "SELECT DISTINCT class_name, section FROM students WHERE status = 'Active' ORDER BY class_name, section"
     )
     if not classes:
-        st.info("Add active students before marking attendance.")
+        st.info(t("add_active_students_attendance"))
         return
 
-    class_choice = st.selectbox("Class and section", classes, format_func=lambda r: f"{r['class_name']} - {r['section']}")
-    selected_date = st.date_input("Attendance date", value=date.today())
+    class_options = {f"{row['class_name']}|||{row['section']}": row for row in classes}
+    class_key = st.selectbox(
+        t("class_and_section"),
+        list(class_options.keys()),
+        format_func=lambda key: f"{class_options[key]['class_name']} - {class_options[key]['section']}",
+    )
+    class_choice = class_options[class_key]
+    selected_date = st.date_input(t("attendance_date"), value=date.today())
 
     students = fetch_all(
         """
@@ -575,22 +730,23 @@ def attendance_page(user: User) -> None:
             cols[0].caption(f"{student['first_name']} {student['last_name']}")
             current_status = student["existing_status"] or "Present"
             status = cols[1].selectbox(
-                "Status",
+                t("status"),
                 ATTENDANCE_STATUSES,
                 index=ATTENDANCE_STATUSES.index(current_status),
                 key=f"status_{student['id']}",
                 label_visibility="collapsed",
+                format_func=translate_status,
             )
             remarks = cols[2].text_input(
-                "Remarks",
+                t("remarks"),
                 value=student["existing_remarks"] or "",
                 key=f"remarks_{student['id']}",
                 label_visibility="collapsed",
-                placeholder="Optional remarks",
+                placeholder=t("optional_remarks"),
             )
             entries.append((student["id"], status, remarks))
 
-        submitted = st.form_submit_button("Save attendance", use_container_width=True)
+        submitted = st.form_submit_button(t("save_attendance"), use_container_width=True)
 
     if submitted:
         with closing(connect()) as conn:
@@ -610,7 +766,7 @@ def attendance_page(user: User) -> None:
                     (student_id, selected_date.isoformat(), status, user.id, remarks.strip(), stamp, stamp),
                 )
             conn.commit()
-        st.success("Attendance saved. Existing entries were updated safely when present.")
+        st.success(t("attendance_saved"))
         st.rerun()
 
     summary = fetch_all(
@@ -624,16 +780,16 @@ def attendance_page(user: User) -> None:
         (selected_date.isoformat(),),
     )
     if summary:
-        st.subheader("Daily Summary")
-        st.dataframe([dict(row) for row in summary], use_container_width=True, hide_index=True)
+        st.subheader(t("daily_summary"))
+        st.dataframe(localize_rows(summary), use_container_width=True, hide_index=True)
 
 
 def face_attendance_page(user: User) -> None:
     page_header(
-        "Vision Gate",
-        "Face <strong>Attendance</strong>",
-        "Enroll student face references, then capture or upload a face image to mark attendance automatically.",
-        ("Camera capture", "Face profile registry", "Auto present marking"),
+        t("vision_gate"),
+        t("face_attendance_title_html"),
+        t("face_attendance_copy"),
+        (t("camera_capture"), t("face_profile_registry"), t("auto_present_marking")),
     )
 
     registered = fetch_one("SELECT COUNT(*) AS total FROM face_profiles")
@@ -641,41 +797,58 @@ def face_attendance_page(user: User) -> None:
     st.markdown(
         f"""
         <div class="metric-row">
-          <div class="metric-tile"><strong>{registered['total']}</strong><span>Face profiles</span></div>
-          <div class="metric-tile"><strong>{active_students['total']}</strong><span>Active students</span></div>
-          <div class="metric-tile"><strong>Present</strong><span>Recognition result</span></div>
-          <div class="metric-tile"><strong>Secure</strong><span>Stored as image fingerprint</span></div>
+          <div class="metric-tile"><strong>{registered['total']}</strong><span>{t("face_profiles")}</span></div>
+          <div class="metric-tile"><strong>{active_students['total']}</strong><span>{t("active_students")}</span></div>
+          <div class="metric-tile"><strong>{t("present")}</strong><span>{t("recognition_result")}</span></div>
+          <div class="metric-tile"><strong>{t("secure")}</strong><span>{t("stored_as_image_fingerprint")}</span></div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    enroll_tab, scan_tab = st.tabs(["Register Face", "Scan Attendance"])
+    enroll_tab, scan_tab = st.tabs([t("register_face"), t("scan_attendance")])
 
     with enroll_tab:
+        if registered["total"] == 0 and user.role == "Admin":
+            st.info(t("demo_profiles_help"))
+            if st.button(t("create_demo_face_profiles"), use_container_width=True):
+                count = create_demo_face_profiles()
+                st.success(t("demo_profiles_created").format(count=count))
+                st.rerun()
         if user.role != "Admin":
-            st.info("Only Admin users can register or update student face profiles.")
+            st.info(t("admin_face_only"))
         students = student_options(active_only=True)
         if not students:
-            st.warning("Add active students before registering faces.")
+            st.warning(t("add_active_students_faces"))
         else:
+            student_lookup = {row["id"]: row for row in students}
             selected = st.selectbox(
-                "Student",
-                students,
-                format_func=lambda r: f"{r['roll_number']} - {r['first_name']} {r['last_name']} ({r['class_name']}-{r['section']})",
+                t("student"),
+                list(student_lookup.keys()),
+                format_func=lambda student_id: (
+                    f"{student_lookup[student_id]['roll_number']} - "
+                    f"{student_lookup[student_id]['first_name']} {student_lookup[student_id]['last_name']} "
+                    f"({student_lookup[student_id]['class_name']}-{student_lookup[student_id]['section']})"
+                ),
                 key="face_register_student",
             )
-            source = st.radio("Reference image source", ("Camera", "Upload"), horizontal=True, key="face_register_source")
+            source = st.radio(
+                t("reference_image_source"),
+                ("Camera", "Upload"),
+                horizontal=True,
+                key="face_register_source",
+                format_func=lambda value: t("camera") if value == "Camera" else t("upload"),
+            )
             image_file = (
-                st.camera_input("Capture student face", key="face_register_camera")
+                st.camera_input(t("capture_student_face"), key="face_register_camera")
                 if source == "Camera"
-                else st.file_uploader("Upload student face image", type=("jpg", "jpeg", "png"), key="face_register_upload")
+                else st.file_uploader(t("upload_student_face_image"), type=("jpg", "jpeg", "png"), key="face_register_upload")
             )
 
-            if st.button("Save face profile", disabled=user.role != "Admin" or image_file is None, use_container_width=True):
+            if st.button(t("save_face_profile"), disabled=user.role != "Admin" or image_file is None, use_container_width=True):
                 try:
                     image_hash = image_to_hash(image_file)
-                    image_path = save_face_reference(selected["id"], image_file)
+                    image_path = save_face_reference(selected, image_file)
                     with closing(connect()) as conn:
                         stamp = now_text()
                         conn.execute(
@@ -687,31 +860,59 @@ def face_attendance_page(user: User) -> None:
                                           image_path = excluded.image_path,
                                           updated_at = excluded.updated_at
                             """,
-                            (selected["id"], image_hash, image_path, stamp, stamp),
+                            (selected, image_hash, image_path, stamp, stamp),
                         )
                         conn.commit()
-                    st.success("Face profile saved for attendance recognition.")
+                    st.success(t("face_profile_saved"))
                     st.rerun()
                 except Exception as exc:
-                    st.error("Could not save that face image. Try a clearer front-facing photo.")
+                    st.error(t("face_image_save_error"))
                     st.caption(str(exc))
 
     with scan_tab:
-        selected_date = st.date_input("Attendance date", value=date.today(), key="face_scan_date")
-        source = st.radio("Scan image source", ("Camera", "Upload"), horizontal=True, key="face_scan_source")
-        scan_file = (
-            st.camera_input("Capture face for attendance", key="face_scan_camera")
-            if source == "Camera"
-            else st.file_uploader("Upload face image for attendance", type=("jpg", "jpeg", "png"), key="face_scan_upload")
+        selected_date = st.date_input(t("attendance_date"), value=date.today(), key="face_scan_date")
+        scan_sources = ("Camera", "Upload", "Demo")
+        source = st.radio(
+            t("scan_image_source"),
+            scan_sources,
+            horizontal=True,
+            key="face_scan_source",
+            format_func=lambda value: {"Camera": t("camera"), "Upload": t("upload"), "Demo": t("demo")}[value],
         )
+        demo_student = None
+        if source == "Camera":
+            scan_file = st.camera_input(t("capture_face_attendance"), key="face_scan_camera")
+        elif source == "Upload":
+            scan_file = st.file_uploader(t("upload_face_attendance"), type=("jpg", "jpeg", "png"), key="face_scan_upload")
+        else:
+            students = student_options(active_only=True)
+            student_lookup = {row["id"]: row for row in students}
+            demo_student_id = None
+            demo_student = st.selectbox(
+                t("demo_face_scan_student"),
+                list(student_lookup.keys()),
+                format_func=lambda student_id: (
+                    f"{student_lookup[student_id]['roll_number']} - "
+                    f"{student_lookup[student_id]['first_name']} {student_lookup[student_id]['last_name']}"
+                ),
+                key="face_demo_student",
+            )
+            demo_student_id = demo_student
+            demo_student = student_lookup[demo_student_id] if demo_student_id else None
+            scan_file = demo_face_image(demo_student) if demo_student else None
+            if scan_file:
+                st.image(scan_file, caption=t("demo_face_preview"), width=180)
 
-        if st.button("Recognize and mark present", disabled=scan_file is None, use_container_width=True):
+        if st.button(t("recognize_mark_present"), disabled=scan_file is None, use_container_width=True):
             try:
+                if source == "Demo" and demo_student:
+                    scan_file = demo_face_image(demo_student)
+                scan_file.seek(0)
                 scan_hash = image_to_hash(scan_file)
                 match, confidence, distance = find_face_match(scan_hash)
                 if not match:
-                    st.error(f"No confident face match found. Closest confidence: {confidence}%.")
-                    st.caption(f"Distance score: {distance}. Register a clearer face profile or try a brighter image.")
+                    st.error(t("no_face_match").format(confidence=confidence))
+                    st.caption(t("distance_score_hint").format(distance=distance))
                     return
 
                 with closing(connect()) as conn:
@@ -731,7 +932,7 @@ def face_attendance_page(user: User) -> None:
                             match["student_id"],
                             selected_date.isoformat(),
                             user.id,
-                            f"Marked by face recognition with {confidence}% confidence",
+                            t("marked_by_face").format(confidence=confidence),
                             stamp,
                             stamp,
                         ),
@@ -739,11 +940,15 @@ def face_attendance_page(user: User) -> None:
                     conn.commit()
 
                 st.success(
-                    f"Attendance marked Present for {match['student']} "
-                    f"({match['roll_number']}) with {confidence}% confidence."
+                    t("face_marked_success").format(
+                        status=t("present"),
+                        student=match["student"],
+                        roll_number=match["roll_number"],
+                        confidence=confidence,
+                    )
                 )
             except Exception as exc:
-                st.error("Could not process that face image. Try a clearer front-facing photo.")
+                st.error(t("face_process_error"))
                 st.caption(str(exc))
 
 
@@ -792,30 +997,30 @@ def to_csv(rows: list[dict]) -> str:
     writer = csv.DictWriter(output, fieldnames=list(rows[0].keys()))
     writer.writeheader()
     writer.writerows(rows)
-    return output.getvalue()
+    return "\ufeff" + output.getvalue()
 
 
 def reports_page() -> None:
     page_header(
-        "Analytics Core",
-        "Attendance <strong>Reports</strong>",
-        "Filter attendance intelligence by date range, class, or student, then export clean CSV summaries.",
-        ("Percentage engine", "Range filters", "CSV export"),
+        t("analytics_core"),
+        t("reports_title_html"),
+        t("reports_copy"),
+        (t("percentage_engine"), t("range_filters"), t("csv_export")),
     )
 
     cols = st.columns(4)
-    start_date = cols[0].date_input("Start date", value=date.today() - timedelta(days=30))
-    end_date = cols[1].date_input("End date", value=date.today())
+    start_date = cols[0].date_input(t("start_date"), value=date.today() - timedelta(days=30))
+    end_date = cols[1].date_input(t("end_date"), value=date.today())
     classes = ["All"] + [row["class_name"] for row in fetch_all("SELECT DISTINCT class_name FROM students ORDER BY class_name")]
-    class_filter = cols[2].selectbox("Class", classes)
+    class_filter = cols[2].selectbox(t("class"), classes, format_func=lambda value: t("all") if value == "All" else value)
     students = student_options(active_only=False)
-    student_labels = {0: "All students"} | {
+    student_labels = {0: t("all_students")} | {
         row["id"]: f"{row['roll_number']} - {row['first_name']} {row['last_name']}" for row in students
     }
-    student_id = cols[3].selectbox("Student", list(student_labels.keys()), format_func=student_labels.get)
+    student_id = cols[3].selectbox(t("student"), list(student_labels.keys()), format_func=student_labels.get)
 
     if start_date > end_date:
-        st.error("Start date must be before or equal to end date.")
+        st.error(t("date_validation"))
         return
 
     rows = [row_with_percentage(row) for row in build_report_rows(start_date, end_date, class_filter, student_id or None)]
@@ -827,19 +1032,20 @@ def reports_page() -> None:
     st.markdown(
         f"""
         <div class="metric-row">
-          <div class="metric-tile"><strong>{total_present}</strong><span>Total present</span></div>
-          <div class="metric-tile"><strong>{total_absent}</strong><span>Total absent</span></div>
-          <div class="metric-tile"><strong>{total_excused}</strong><span>Total excused</span></div>
-          <div class="metric-tile"><strong>{rate}%</strong><span>Attendance rate</span></div>
+          <div class="metric-tile"><strong>{total_present}</strong><span>{t("total_present")}</span></div>
+          <div class="metric-tile"><strong>{total_absent}</strong><span>{t("total_absent")}</span></div>
+          <div class="metric-tile"><strong>{total_excused}</strong><span>{t("total_excused")}</span></div>
+          <div class="metric-tile"><strong>{rate}%</strong><span>{t("attendance_rate")}</span></div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    st.dataframe(rows, use_container_width=True, hide_index=True)
-    csv_data = to_csv(rows)
+    localized_rows = localize_rows(rows)
+    st.dataframe(localized_rows, use_container_width=True, hide_index=True)
+    csv_data = to_csv(localized_rows)
     st.download_button(
-        "Download CSV",
+        t("download_csv"),
         data=csv_data,
         file_name=f"attendance-report-{start_date.isoformat()}-{end_date.isoformat()}.csv",
         mime="text/csv",
@@ -850,32 +1056,32 @@ def reports_page() -> None:
 
 def users_page(user: User) -> None:
     page_header(
-        "Admin Control",
-        "User <strong>Access</strong>",
-        "Manage teacher and admin identities with hashed passwords and role-separated workflows.",
-        ("Password hashing", "Role gates", "Session timeout"),
+        t("admin_control"),
+        t("user_access_title_html"),
+        t("user_access_copy"),
+        (t("password_hashing"), t("role_gates"), t("session_timeout")),
     )
     if user.role != "Admin":
-        st.error("Only Admin users can manage system users.")
+        st.error(t("admin_users_only"))
         return
 
     rows = fetch_all("SELECT id, username, full_name, role, email, phone, last_login FROM users ORDER BY role, username")
-    st.dataframe([dict(row) for row in rows], use_container_width=True, hide_index=True)
+    st.dataframe(localize_rows(rows), use_container_width=True, hide_index=True)
 
     with st.form("create_user"):
         cols = st.columns(2)
-        username = cols[0].text_input("Username")
-        full_name = cols[1].text_input("Full name")
-        password = cols[0].text_input("Temporary password", type="password")
-        role = cols[1].selectbox("Role", ("Teacher", "Admin"))
-        email = cols[0].text_input("Email")
-        phone = cols[1].text_input("Phone")
-        if st.form_submit_button("Create user", use_container_width=True):
+        username = cols[0].text_input(t("username"))
+        full_name = cols[1].text_input(t("full_name"))
+        password = cols[0].text_input(t("temporary_password"), type="password")
+        role = cols[1].selectbox(t("role"), ("Teacher", "Admin"), format_func=translate_role)
+        email = cols[0].text_input(t("email"))
+        phone = cols[1].text_input(t("phone"))
+        if st.form_submit_button(t("create_user"), use_container_width=True):
             if len(password) < 6:
-                st.error("Password must contain at least 6 characters.")
+                st.error(t("password_length_validation"))
                 return
             if not username.strip() or not full_name.strip():
-                st.error("Username and full name are required.")
+                st.error(t("user_required_fields"))
                 return
             try:
                 with closing(connect()) as conn:
@@ -898,25 +1104,27 @@ def users_page(user: User) -> None:
                         ),
                     )
                     conn.commit()
-                st.success("User created.")
+                st.success(t("user_created"))
                 st.rerun()
             except sqlite3.IntegrityError:
-                st.error("Username already exists.")
+                st.error(t("username_exists"))
 
 
 def sidebar(user: User) -> str:
-    st.sidebar.title("AT Command")
-    st.sidebar.caption(f"{user.full_name} / {user.role}")
-    pages = ["Dashboard", "Students", "Attendance", "Face Attendance", "Reports", "Users"]
-    page = st.sidebar.radio("Navigation", pages, label_visibility="collapsed")
-    if st.sidebar.button("Logout", use_container_width=True):
-        st.session_state.clear()
+    language_selector()
+    st.sidebar.title(t("sidebar_title"))
+    st.sidebar.caption(f"{user.full_name} / {translate_role(user.role)}")
+    pages = ["dashboard", "students", "attendance", "face_attendance", "reports", "users"]
+    page = st.sidebar.radio(t("navigation"), pages, format_func=t, label_visibility="collapsed")
+    if st.sidebar.button(t("logout"), use_container_width=True):
+        clear_session_keep_language()
         st.rerun()
     return page
 
 
 def app() -> None:
-    st.set_page_config(page_title="Attendance Tracker", page_icon="AT", layout="wide")
+    init_language()
+    st.set_page_config(page_title=t("app_title"), page_icon="AT", layout="wide")
     load_css()
     init_db()
     user = current_user()
@@ -925,17 +1133,17 @@ def app() -> None:
         return
 
     page = sidebar(user)
-    if page == "Dashboard":
+    if page == "dashboard":
         dashboard()
-    elif page == "Students":
+    elif page == "students":
         student_management(user)
-    elif page == "Attendance":
+    elif page == "attendance":
         attendance_page(user)
-    elif page == "Face Attendance":
+    elif page == "face_attendance":
         face_attendance_page(user)
-    elif page == "Reports":
+    elif page == "reports":
         reports_page()
-    elif page == "Users":
+    elif page == "users":
         users_page(user)
 
 
@@ -943,8 +1151,10 @@ def main() -> None:
     try:
         app()
     except Exception as exc:
-        st.error("The application could not complete that action. Please check your data and try again.")
-        with st.expander("Technical details"):
+        if "language" not in st.session_state:
+            st.session_state.language = "en"
+        st.error(t("app_error"))
+        with st.expander(t("technical_details")):
             st.code(str(exc))
 
 
